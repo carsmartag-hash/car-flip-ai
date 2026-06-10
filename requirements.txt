@@ -1,5 +1,7 @@
 streamlit
-openaistreamlit
 requests
 beautifulsoup4
 pandas
+numpy
+lxml
+python-dateutil
