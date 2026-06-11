@@ -61,20 +61,18 @@ h1 {
 """, unsafe_allow_html=True)
 
 MARKETS = {
-    "Salt Lake City Metro, UT": {
-        "site": "saltlakecity",
-        "postal": "84101",
-        "distance": 85
-    },
-    "Ogden, UT": {
-        "site": "ogden",
-        "postal": "84401",
-        "distance": 55
-    },
-    "Provo / Orem, UT": {
-        "site": "provo",
-        "postal": "84601",
-        "distance": 55
+    st.sidebar.subheader("Market")
+
+market = st.sidebar.selectbox(
+    "Search Area",
+    ["Salt Lake 90-mile radius"],
+    index=0
+)
+
+CENTER_ZIP = "84107"
+RADIUS_MILES = 90
+
+st.sidebar.caption(f"Searching from ZIP {CENTER_ZIP} within {RADIUS_MILES} miles")
     },
     "Columbus, OH": {
         "site": "columbus",
