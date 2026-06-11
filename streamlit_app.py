@@ -60,26 +60,13 @@ h1 {
 </style>
 """, unsafe_allow_html=True)
 
-MARKETS = {
-    st.sidebar.subheader("Market")
-
-market = st.sidebar.selectbox(
-    "Search Area",
-    ["Salt Lake 90-mile radius"],
-    index=0
-)
+# =========================
+# FIXED MARKET SETTINGS
+# =========================
 
 CENTER_ZIP = "84107"
 RADIUS_MILES = 90
-
-st.sidebar.caption(f"Searching from ZIP {CENTER_ZIP} within {RADIUS_MILES} miles")
-    },
-    "Columbus, OH": {
-        "site": "columbus",
-        "postal": "43082",
-        "distance": 50
-    }
-}
+CRAIGSLIST_SITE = "saltlakecity"
 
 BAD_KEYWORDS = [
     "parts only", "mechanic special", "does not run", "not running",
@@ -201,18 +188,27 @@ def deal_score(title, price, miles, target_profit):
     text = title.lower()
 
     penalty = 0
+
     if any(k in text for k in BAD_KEYWORDS):
         penalty += 35
+
+    if miles is None:
+        penalty += 15
+
     if miles and miles > 160000:
         penalty += 15
+
     if risk >= 5:
         penalty += 15
 
     bonus = 0
+
     if any(k in text for k in GOOD_KEYWORDS):
         bonus += 8
+
     if profit >= target_profit:
         bonus += 25
+
     if profit >= target_profit + 1500:
         bonus += 15
 
@@ -228,7 +224,7 @@ def deal_score(title, price, miles, target_profit):
     if score >= 75 and profit >= target_profit:
         verdict = "BUY"
     elif score >= 58 and profit >= 1000:
-        verdict = "MAYBE"
+        verdict = "WATCH"
     else:
         verdict = "SKIP"
 
@@ -249,12 +245,12 @@ def deal_score(title, price, miles, target_profit):
         "risk": risk_label
     }
 
-def craigslist_url(site, postal, distance, min_price, max_price, max_miles):
+def craigslist_url(min_price, max_price, max_miles):
     params = {
         "min_price": int(min_price),
         "max_price": int(max_price),
-        "search_distance": int(distance),
-        "postal": postal,
+        "search_distance": int(RADIUS_MILES),
+        "postal": CENTER_ZIP,
         "bundleDuplicates": 1,
         "sort": "date"
     }
@@ -262,14 +258,18 @@ def craigslist_url(site, postal, distance, min_price, max_price, max_miles):
     if max_miles:
         params["max_auto_miles"] = int(max_miles)
 
-    return f"https://{site}.craigslist.org/search/cto?" + urlencode(params)
+    # cto = cars/trucks by owner
+    return f"https://{CRAIGSLIST_SITE}.craigslist.org/search/cto?" + urlencode(params)
 
 def parse_price(text):
     if not text:
         return None
+
     match = re.search(r"\$?([\d,]+)", text)
+
     if not match:
         return None
+
     try:
         return int(match.group(1).replace(",", ""))
     except Exception:
@@ -285,7 +285,8 @@ def parse_miles_from_text(text):
         r"\b(\d{2,3})k\s*miles\b",
         r"\b(\d{2,3})k\s*mi\b",
         r"\b(\d{5,6})\s*miles\b",
-        r"\b(\d{5,6})\s*mi\b"
+        r"\b(\d{5,6})\s*mi\b",
+        r"\bodometer:\s*(\d{5,6})\b"
     ]
 
     for pattern in patterns:
@@ -299,8 +300,8 @@ def parse_miles_from_text(text):
     return None
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_craigslist(site, postal, distance, min_price, max_price, max_miles):
-    url = craigslist_url(site, postal, distance, min_price, max_price, max_miles)
+def fetch_craigslist(min_price, max_price, max_miles):
+    url = craigslist_url(min_price, max_price, max_miles)
 
     headers = {
         "User-Agent": "Mozilla/5.0 AppleWebKit/605.1.15 Mobile Safari/604.1"
@@ -328,7 +329,7 @@ def fetch_craigslist(site, postal, distance, min_price, max_price, max_miles):
         if link_el and link_el.get("href"):
             link = link_el.get("href")
             if link.startswith("/"):
-                link = f"https://{site}.craigslist.org{link}"
+                link = f"https://{CRAIGSLIST_SITE}.craigslist.org{link}"
 
         location = clean_text(location_el.get_text(" ")) if location_el else ""
         full_text = clean_text(item.get_text(" "))
@@ -337,6 +338,7 @@ def fetch_craigslist(site, postal, distance, min_price, max_price, max_miles):
         if not title or not price:
             continue
 
+        # Remove obvious garbage before scoring
         if any(k in title.lower() for k in BAD_KEYWORDS):
             continue
 
@@ -358,18 +360,17 @@ def value_research_links(title):
         "CarGurus": f"https://www.cargurus.com/Cars/inventorylisting/viewDetailsFilterViewInventoryListing.action?search={q}"
     }
 
+# =========================
+# APP UI
+# =========================
+
 st.title("Car Flip AI")
-st.caption("Mobile Craigslist private-party scanner")
+st.caption("Craigslist private-party scanner — Salt Lake 90-mile radius")
 
 st.subheader("Settings")
 
-market_name = st.selectbox(
-    "Market",
-    list(MARKETS.keys()),
-    index=0
-)
-
-market = MARKETS[market_name]
+st.markdown("**Market:** Salt Lake 90-mile radius")
+st.caption(f"Center ZIP: {CENTER_ZIP} | Radius: {RADIUS_MILES} miles | Includes Ogden / Provo if inside radius")
 
 max_miles = st.number_input(
     "Max Mileage",
@@ -403,8 +404,14 @@ target_profit = st.number_input(
     step=500
 )
 
+show_skips = st.toggle(
+    "Show skipped listings",
+    value=False,
+    help="Leave this off. Turn on only when you want to debug bad listings."
+)
+
 st.caption(
-    f"Current search: {market_name} | {market['distance']} miles from ZIP {market['postal']} | owner-only Craigslist"
+    f"Current search: {RADIUS_MILES} miles from ZIP {CENTER_ZIP} | owner-only Craigslist"
 )
 
 scan = st.button("Scan Craigslist")
@@ -417,9 +424,6 @@ if scan:
     with st.spinner("Scanning Craigslist owner listings..."):
         try:
             listings, source_url = fetch_craigslist(
-                market["site"],
-                market["postal"],
-                market["distance"],
                 min_price,
                 max_price,
                 max_miles
@@ -449,23 +453,36 @@ if scan:
 
     df = pd.DataFrame(scored)
 
-    verdict_rank = {"BUY": 0, "MAYBE": 1, "SKIP": 2}
+    verdict_rank = {"BUY": 0, "WATCH": 1, "SKIP": 2}
     df["rank"] = df["verdict"].map(verdict_rank)
     df = df.sort_values(by=["rank", "profit", "score"], ascending=[True, False, False])
 
     buy_count = int((df["verdict"] == "BUY").sum())
-    maybe_count = int((df["verdict"] == "MAYBE").sum())
+    watch_count = int((df["verdict"] == "WATCH").sum())
+    skip_count = int((df["verdict"] == "SKIP").sum())
+
+    visible_df = df.copy()
+
+    if not show_skips:
+        visible_df = visible_df[visible_df["verdict"] != "SKIP"]
 
     c1, c2, c3 = st.columns(3)
     c1.metric("BUY", buy_count)
-    c2.metric("MAYBE", maybe_count)
-    c3.metric("Listings", len(df))
+    c2.metric("WATCH", watch_count)
+    c3.metric("Hidden SKIP", skip_count if not show_skips else 0)
 
-    st.subheader("Best Deals")
+    if show_skips:
+        st.subheader("All Listings")
+    else:
+        st.subheader("Best Deals Only")
 
-    for _, row in df.head(40).iterrows():
+    if visible_df.empty:
+        st.warning("No BUY or WATCH deals found with current filters. Try raising max price, max mileage, or lowering target profit.")
+        st.stop()
+
+    for _, row in visible_df.head(40).iterrows():
         verdict = row["verdict"]
-        css = "good" if verdict == "BUY" else "mid" if verdict == "MAYBE" else "bad"
+        css = "good" if verdict == "BUY" else "mid" if verdict == "WATCH" else "bad"
         miles_text = "Unknown" if pd.isna(row["miles"]) else f"{int(row['miles']):,}"
 
         st.markdown(
