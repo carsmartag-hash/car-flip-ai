@@ -1,9 +1,8 @@
 import re
 import requests
-import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote_plus
 
 st.set_page_config(
     page_title="Car Flip AI",
@@ -15,503 +14,503 @@ st.set_page_config(
 st.markdown("""
 <style>
 .block-container {
-    padding-top: 1.1rem !important;
-    padding-left: 1rem !important;
-    padding-right: 1rem !important;
-    max-width: 760px !important;
+    padding-top: 1rem !important;
+    max-width: 850px !important;
 }
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 header {visibility: hidden;}
-
-h1 {
-    font-size: 2.9rem !important;
-    line-height: 1.05 !important;
-    margin-bottom: 0.2rem !important;
-}
-
-.stButton > button {
-    width: 100%;
-    border-radius: 14px;
-    font-weight: 800;
-    padding: 0.75rem 1rem;
-}
-
-.car-card {
-    border: 1px solid rgba(250,250,250,0.18);
-    border-radius: 18px;
-    padding: 16px;
-    margin-bottom: 14px;
-    background: rgba(255,255,255,0.045);
-}
-
-.good { color: #2ecc71; font-weight: 900; }
-.mid { color: #f1c40f; font-weight: 900; }
-.bad { color: #ff6b6b; font-weight: 900; }
-.small-muted { color: rgba(250,250,250,0.65); font-size: 0.92rem; }
-
-@media (max-width: 480px) {
-    h1 { font-size: 2.55rem !important; }
-    .block-container {
-        padding-left: 0.85rem !important;
-        padding-right: 0.85rem !important;
-    }
-}
 </style>
 """, unsafe_allow_html=True)
 
-# =========================
-# FIXED MARKET SETTINGS
-# =========================
+SEARCH_ZIP = "84107"
+SEARCH_RADIUS_MILES = 90
 
-CENTER_ZIP = "84107"
-RADIUS_MILES = 90
-CRAIGSLIST_SITE = "saltlakecity"
+MIN_YEAR = 2008
+MIN_PRICE = 1000
+MAX_PRICE = 16000
+MAX_MILES = 190000
 
-BAD_KEYWORDS = [
-    "parts only", "mechanic special", "does not run", "not running",
-    "no title", "salvage parts", "blown", "bad transmission",
-    "bad engine", "needs engine", "needs transmission", "project car",
-    "camper", "rv", "motorhome", "box truck", "semi", "trailer"
-]
+MIN_TARGET_PROFIT = 2000
+SAFETY_DISCOUNT = 1000
+SELLING_COST_BUFFER = 500
 
-GOOD_KEYWORDS = [
-    "clean title", "new tires", "new brakes", "runs good", "runs great",
-    "no issues", "cold ac", "one owner", "well maintained"
-]
-
-BRAND_RISK = {
-    "toyota": 1, "honda": 1, "lexus": 1, "acura": 1,
-    "mazda": 2,
-    "subaru": 3, "ford": 3, "chevy": 3, "chevrolet": 3,
-    "gmc": 3, "hyundai": 3, "kia": 3,
-    "nissan": 4, "infiniti": 4, "cadillac": 4, "volvo": 4,
-    "bmw": 5, "mercedes": 5, "audi": 5, "volkswagen": 5,
-    "vw": 5, "mini": 5, "chrysler": 5, "dodge": 5,
-    "jeep": 5, "fiat": 5, "land rover": 5, "jaguar": 5
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
 }
 
-def clean_text(x):
-    if not x:
-        return ""
-    return re.sub(r"\s+", " ", str(x)).strip()
+BAD_WORDS = [
+    "flat tow", "flat-tow", "dinghy tow", "dinghy", "toad",
+    "tow behind", "rv tow", "motorhome tow",
+    "mechanic special", "project car", "parts car", "parts only",
+    "for parts", "not running", "does not run", "doesn't run",
+    "wont run", "won't run", "no start", "bad engine", "needs engine",
+    "blown engine", "bad transmission", "needs transmission",
+    "bill of sale", "no title", "lost title", "title issue",
+    "camper", "rv", "motorhome", "school bus", "box truck",
+    "semi", "tractor", "trailer"
+]
 
-def money(x):
+RISK_WORDS = [
+    "salvage", "rebuilt", "branded", "hail", "water damage",
+    "flood", "airbag", "frame damage", "check engine", "cel",
+    "overheating", "misfire", "rough idle", "oil leak",
+    "coolant leak", "needs work", "as is"
+]
+
+GOOD_MODELS = [
+    "toyota camry", "toyota corolla", "toyota rav4", "toyota highlander",
+    "toyota sienna", "honda accord", "honda civic", "honda cr-v",
+    "honda crv", "honda pilot", "lexus rx", "lexus es",
+    "mazda 3", "mazda cx-5", "subaru outback", "subaru forester",
+    "hyundai elantra", "hyundai sonata", "kia optima", "kia forte",
+    "ford f-150", "ford f150", "chevy silverado",
+    "chevrolet silverado", "gmc sierra", "toyota tacoma", "toyota tundra"
+]
+
+BAD_MODELS = [
+    "ford focus", "ford fiesta", "nissan altima", "nissan sentra",
+    "nissan versa", "chevy cruze", "chevrolet cruze", "chevy sonic",
+    "dodge dart", "mini cooper", "range rover", "land rover"
+]
+
+
+def money(value):
+    if value is None:
+        return "N/A"
     try:
-        return f"${int(x):,}"
+        return "${:,.0f}".format(float(value))
     except Exception:
-        return "$0"
+        return "N/A"
 
-def extract_year(title):
-    match = re.search(r"\b(19[8-9]\d|20[0-2]\d)\b", title)
-    return int(match.group(1)) if match else None
 
-def guess_make(title):
-    text = title.lower()
-    for make in BRAND_RISK.keys():
-        if make in text:
-            return make
-    return "unknown"
+def clean_text(text):
+    if not text:
+        return ""
+    text = BeautifulSoup(str(text), "html.parser").get_text(" ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
-def brand_risk_score(title):
-    return BRAND_RISK.get(guess_make(title), 3)
-
-def estimate_retail_value(title, price, miles):
-    year = extract_year(title)
-    risk = brand_risk_score(title)
-
-    if not price:
-        return 0
-
-    markup = 1.28
-
-    if risk == 1:
-        markup += 0.13
-    elif risk == 2:
-        markup += 0.08
-    elif risk == 4:
-        markup -= 0.08
-    elif risk == 5:
-        markup -= 0.15
-
-    if miles:
-        if miles < 80000:
-            markup += 0.13
-        elif miles < 120000:
-            markup += 0.06
-        elif miles > 170000:
-            markup -= 0.20
-        elif miles > 140000:
-            markup -= 0.10
-
-    if year:
-        if year >= 2016:
-            markup += 0.08
-        elif year <= 2007:
-            markup -= 0.10
-
-    retail = int(price * markup)
-
-    if risk <= 2:
-        retail += 700
-    elif risk >= 5:
-        retail -= 500
-
-    return max(retail, price)
-
-def estimate_recon(title, miles):
-    text = title.lower()
-    recon = 700
-
-    if miles and miles > 150000:
-        recon += 500
-    elif miles and miles > 120000:
-        recon += 300
-
-    if any(word in text for word in ["bmw", "mercedes", "audi", "mini", "volkswagen", "vw"]):
-        recon += 700
-
-    if any(word in text for word in ["needs", "check engine", "abs", "misfire", "overheating", "leak"]):
-        recon += 900
-
-    if any(word in text for word in ["new tires", "new brakes", "serviced", "maintenance"]):
-        recon -= 200
-
-    return max(recon, 400)
-
-def deal_score(title, price, miles, target_profit):
-    retail = estimate_retail_value(title, price, miles)
-    recon = estimate_recon(title, miles)
-    fees = 350
-    profit = retail - price - recon - fees
-    risk = brand_risk_score(title)
-    text = title.lower()
-
-    penalty = 0
-
-    if any(k in text for k in BAD_KEYWORDS):
-        penalty += 35
-
-    if miles is None:
-        penalty += 15
-
-    if miles and miles > 160000:
-        penalty += 15
-
-    if risk >= 5:
-        penalty += 15
-
-    bonus = 0
-
-    if any(k in text for k in GOOD_KEYWORDS):
-        bonus += 8
-
-    if profit >= target_profit:
-        bonus += 25
-
-    if profit >= target_profit + 1500:
-        bonus += 15
-
-    score = max(0, min(100, 50 + bonus - penalty))
-
-    if profit < 500:
-        score -= 25
-    elif profit < target_profit:
-        score -= 12
-
-    score = max(0, min(100, score))
-
-    if score >= 75 and profit >= target_profit:
-        verdict = "BUY"
-    elif score >= 58 and profit >= 1000:
-        verdict = "WATCH"
-    else:
-        verdict = "SKIP"
-
-    if risk <= 2:
-        risk_label = "Low"
-    elif risk == 3:
-        risk_label = "Medium"
-    else:
-        risk_label = "High"
-
-    return {
-        "retail": retail,
-        "recon": recon,
-        "fees": fees,
-        "profit": profit,
-        "score": score,
-        "verdict": verdict,
-        "risk": risk_label
-    }
-
-def craigslist_url(min_price, max_price, max_miles):
-    params = {
-        "min_price": int(min_price),
-        "max_price": int(max_price),
-        "search_distance": int(RADIUS_MILES),
-        "postal": CENTER_ZIP,
-        "bundleDuplicates": 1,
-        "sort": "date"
-    }
-
-    if max_miles:
-        params["max_auto_miles"] = int(max_miles)
-
-    # cto = cars/trucks by owner
-    return f"https://{CRAIGSLIST_SITE}.craigslist.org/search/cto?" + urlencode(params)
 
 def parse_price(text):
     if not text:
         return None
-
-    match = re.search(r"\$?([\d,]+)", text)
-
+    match = re.search(r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{4,6})", text)
     if not match:
         return None
+    return int(match.group(1).replace(",", ""))
 
-    try:
-        return int(match.group(1).replace(",", ""))
-    except Exception:
+
+def parse_year(text):
+    if not text:
         return None
+    match = re.search(r"\b(19[8-9][0-9]|20[0-2][0-9])\b", text)
+    if not match:
+        return None
+    year = int(match.group(1))
+    if 1980 <= year <= 2027:
+        return year
+    return None
 
-def parse_miles_from_text(text):
+
+def parse_miles(text):
     if not text:
         return None
 
-    text = text.lower().replace(",", "")
+    t = text.lower().replace(",", "")
 
     patterns = [
-        r"\b(\d{2,3})k\s*miles\b",
-        r"\b(\d{2,3})k\s*mi\b",
-        r"\b(\d{5,6})\s*miles\b",
-        r"\b(\d{5,6})\s*mi\b",
-        r"\bodometer:\s*(\d{5,6})\b"
+        r"\b([0-9]{2,3})\s*k\s*(mi|miles|mile)?\b",
+        r"\b([0-9]{5,6})\s*(mi|miles|mile|odometer)\b",
+        r"(miles|mile|odometer)\D{0,12}([0-9]{5,6})\b"
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text)
+        match = re.search(pattern, t)
+
         if match:
-            miles = int(match.group(1))
-            if "k" in pattern:
-                miles *= 1000
-            return miles
+            nums = [g for g in match.groups() if g and g.isdigit()]
+            if not nums:
+                continue
+
+            raw = int(nums[-1])
+
+            if raw < 1000:
+                raw = raw * 1000
+
+            if 10000 <= raw <= 350000:
+                return raw
 
     return None
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_craigslist(min_price, max_price, max_miles):
-    url = craigslist_url(min_price, max_price, max_miles)
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 AppleWebKit/605.1.15 Mobile Safari/604.1"
+def craigslist_rss_url():
+    params = {
+        "postal": SEARCH_ZIP,
+        "search_distance": SEARCH_RADIUS_MILES,
+        "min_price": MIN_PRICE,
+        "max_price": MAX_PRICE,
+        "auto_title_status": 1,
+        "sort": "date",
+        "format": "rss"
     }
 
-    response = requests.get(url, headers=headers, timeout=18)
-    response.raise_for_status()
+    return "https://saltlakecity.craigslist.org/search/cto?" + urlencode(params)
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    items = soup.select("li.cl-search-result, li.result-row, .cl-static-search-result")
 
-    rows = []
+def fetch_craigslist_rss():
+    url = craigslist_rss_url()
+
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        return [], "Craigslist RSS failed: " + str(e)
+
+    soup = BeautifulSoup(r.text, "xml")
+    items = soup.find_all("item")
+
+    listings = []
 
     for item in items:
-        title_el = item.select_one(".titlestring") or item.select_one(".label") or item.select_one("a")
-        price_el = item.select_one(".priceinfo") or item.select_one(".result-price") or item.select_one(".price")
-        link_el = item.select_one("a")
-        location_el = item.select_one(".location")
+        title = clean_text(item.title.get_text(" ")) if item.title else ""
+        link = clean_text(item.link.get_text(" ")) if item.link else ""
+        desc = clean_text(item.description.get_text(" ")) if item.description else ""
 
-        title = clean_text(title_el.get_text(" ")) if title_el else ""
-        price_text = clean_text(price_el.get_text(" ")) if price_el else ""
-        price = parse_price(price_text)
+        combined = title + " " + desc
 
-        link = ""
-        if link_el and link_el.get("href"):
-            link = link_el.get("href")
-            if link.startswith("/"):
-                link = f"https://{CRAIGSLIST_SITE}.craigslist.org{link}"
+        ask = parse_price(combined)
+        year = parse_year(combined)
+        miles = parse_miles(combined)
 
-        location = clean_text(location_el.get_text(" ")) if location_el else ""
-        full_text = clean_text(item.get_text(" "))
-        miles = parse_miles_from_text(full_text)
-
-        if not title or not price:
+        if not title or ask is None:
             continue
 
-        # Remove obvious garbage before scoring
-        if any(k in title.lower() for k in BAD_KEYWORDS):
-            continue
-
-        rows.append({
+        listings.append({
             "title": title,
-            "price": price,
+            "ask": ask,
+            "year": year,
             "miles": miles,
-            "location": location,
-            "link": link
+            "city": "Salt Lake City area",
+            "url": link,
+            "source": "Craigslist RSS",
+            "raw_text": combined
         })
 
-    return rows, url
+    return listings, None
 
-def value_research_links(title):
-    q = title.replace(" ", "+")
-    return {
-        "KBB": f"https://www.kbb.com/cars-for-sale/all/{q}/",
-        "Cars.com": f"https://www.cars.com/shopping/results/?keyword={q}",
-        "CarGurus": f"https://www.cargurus.com/Cars/inventorylisting/viewDetailsFilterViewInventoryListing.action?search={q}"
-    }
 
-# =========================
-# APP UI
-# =========================
+def normalize_title(title):
+    title = title.lower()
+    title = re.sub(r"\$[0-9,]+", " ", title)
+    title = re.sub(r"\b(19[8-9][0-9]|20[0-2][0-9])\b", " ", title)
+    title = re.sub(r"[^a-z0-9 ]", " ", title)
+    title = re.sub(r"\s+", " ", title).strip()
+    return title
 
-st.title("Car Flip AI")
-st.caption("Craigslist private-party scanner — Salt Lake 90-mile radius")
 
-st.subheader("Settings")
-
-st.markdown("**Market:** Salt Lake 90-mile radius")
-st.caption(f"Center ZIP: {CENTER_ZIP} | Radius: {RADIUS_MILES} miles | Includes Ogden / Provo if inside radius")
-
-max_miles = st.number_input(
-    "Max Mileage",
-    min_value=30000,
-    max_value=300000,
-    value=130000,
-    step=5000
-)
-
-min_price = st.number_input(
-    "Min Price",
-    min_value=0,
-    max_value=50000,
-    value=1000,
-    step=500
-)
-
-max_price = st.number_input(
-    "Max Price",
-    min_value=1000,
-    max_value=50000,
-    value=12000,
-    step=500
-)
-
-target_profit = st.number_input(
-    "Target Profit",
-    min_value=500,
-    max_value=10000,
-    value=2000,
-    step=500
-)
-
-show_skips = st.toggle(
-    "Show skipped listings",
-    value=False,
-    help="Leave this off. Turn on only when you want to debug bad listings."
-)
-
-st.caption(
-    f"Current search: {RADIUS_MILES} miles from ZIP {CENTER_ZIP} | owner-only Craigslist"
-)
-
-scan = st.button("Scan Craigslist")
-
-if scan:
-    if min_price >= max_price:
-        st.error("Min Price must be lower than Max Price.")
-        st.stop()
-
-    with st.spinner("Scanning Craigslist owner listings..."):
-        try:
-            listings, source_url = fetch_craigslist(
-                min_price,
-                max_price,
-                max_miles
-            )
-        except Exception as e:
-            st.error("Craigslist scan failed.")
-            st.code(str(e))
-            st.stop()
-
-    st.success(f"Found {len(listings)} owner listings")
-    st.markdown(f"[Open Craigslist search]({source_url})")
-
-    if not listings:
-        st.warning("No listings found with these filters. Raise max price or mileage.")
-        st.stop()
-
-    scored = []
+def dedupe(listings):
+    seen = set()
+    clean = []
 
     for car in listings:
-        result = deal_score(
-            car["title"],
-            car["price"],
-            car.get("miles"),
-            target_profit
-        )
-        scored.append({**car, **result})
+        price_bucket = int(round(car["ask"] / 500) * 500)
+        key = normalize_title(car["title"]) + "|" + str(price_bucket)
 
-    df = pd.DataFrame(scored)
+        if key in seen:
+            continue
 
-    verdict_rank = {"BUY": 0, "WATCH": 1, "SKIP": 2}
-    df["rank"] = df["verdict"].map(verdict_rank)
-    df = df.sort_values(by=["rank", "profit", "score"], ascending=[True, False, False])
+        seen.add(key)
+        clean.append(car)
 
-    buy_count = int((df["verdict"] == "BUY").sum())
-    watch_count = int((df["verdict"] == "WATCH").sum())
-    skip_count = int((df["verdict"] == "SKIP").sum())
+    return clean
 
-    visible_df = df.copy()
 
-    if not show_skips:
-        visible_df = visible_df[visible_df["verdict"] != "SKIP"]
+def contains_any(text, words):
+    text = text.lower()
+    hits = []
+    for word in words:
+        if word in text:
+            hits.append(word)
+    return hits
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("BUY", buy_count)
-    c2.metric("WATCH", watch_count)
-    c3.metric("Hidden SKIP", skip_count if not show_skips else 0)
 
-    if show_skips:
-        st.subheader("All Listings")
+def estimate_retail(car):
+    title = car["title"].lower()
+    year = car["year"] or 2012
+    miles = car["miles"] or 150000
+    ask = car["ask"]
+
+    if any(m in title for m in GOOD_MODELS):
+        base = 13500
+    elif any(m in title for m in BAD_MODELS):
+        base = 8200
+    elif "truck" in title or "silverado" in title or "f150" in title or "f-150" in title or "sierra" in title or "tacoma" in title:
+        base = 14500
+    elif "suv" in title or "rav4" in title or "cr-v" in title or "pilot" in title or "highlander" in title:
+        base = 13000
     else:
-        st.subheader("Best Deals Only")
+        base = 10500
 
-    if visible_df.empty:
-        st.warning("No BUY or WATCH deals found with current filters. Try raising max price, max mileage, or lowering target profit.")
-        st.stop()
+    retail = base
+    retail += (year - 2012) * 450
+    retail -= max(0, miles - 100000) * 0.035
 
-    for _, row in visible_df.head(40).iterrows():
-        verdict = row["verdict"]
-        css = "good" if verdict == "BUY" else "mid" if verdict == "WATCH" else "bad"
-        miles_text = "Unknown" if pd.isna(row["miles"]) else f"{int(row['miles']):,}"
+    max_markup = ask * 1.35 + 1800
+    retail = min(retail, max_markup)
+    retail = max(retail, ask * 1.05)
+    retail = min(retail, 26000)
 
-        st.markdown(
-            f"""
-            <div class="car-card">
-                <div class="{css}" style="font-size:1.35rem;">{verdict} — Score {int(row['score'])}/100</div>
-                <h3 style="margin-bottom:0.25rem;">{row['title']}</h3>
-                <div class="small-muted">{row.get('location', '')}</div>
-                <br>
-                <b>Ask:</b> {money(row['price'])}<br>
-                <b>Miles:</b> {miles_text}<br>
-                <b>Estimated Retail:</b> {money(row['retail'])}<br>
-                <b>Estimated Recon:</b> {money(row['recon'])}<br>
-                <b>Estimated Profit:</b> {money(row['profit'])}<br>
-                <b>Risk:</b> {row['risk']}<br>
-            </div>
-            """,
-            unsafe_allow_html=True
+    return int(round(retail / 100) * 100)
+
+
+def estimate_recon(car):
+    title = car["title"].lower()
+    year = car["year"] or 2012
+    miles = car["miles"] or 150000
+
+    recon = 700
+
+    if miles > 130000:
+        recon += 350
+
+    if miles > 160000:
+        recon += 450
+
+    if year < 2012:
+        recon += 300
+
+    risk_hits = contains_any(title, RISK_WORDS)
+    recon += len(risk_hits) * 300
+
+    if any(m in title for m in BAD_MODELS):
+        recon += 500
+
+    if "bmw" in title or "audi" in title or "mercedes" in title or "mini" in title or "volkswagen" in title:
+        recon += 700
+
+    return int(round(recon / 50) * 50)
+
+
+def max_buy(retail, recon):
+    value = retail - recon - SAFETY_DISCOUNT - SELLING_COST_BUFFER - MIN_TARGET_PROFIT
+    return int(round(value / 50) * 50)
+
+
+def evaluate(car):
+    title = car["title"]
+    ask = car["ask"]
+    year = car["year"]
+    miles = car["miles"]
+
+    bad_hits = contains_any(title, BAD_WORDS)
+
+    if bad_hits:
+        car["show"] = False
+        car["reason"] = "Rejected: contains '" + bad_hits[0] + "'"
+        return car
+
+    if year is None:
+        car["show"] = False
+        car["reason"] = "Rejected: year unknown"
+        return car
+
+    if year < MIN_YEAR:
+        car["show"] = False
+        car["reason"] = "Rejected: older than " + str(MIN_YEAR)
+        return car
+
+    if miles is None:
+        car["show"] = False
+        car["reason"] = "Rejected: mileage unknown"
+        return car
+
+    if miles > MAX_MILES:
+        car["show"] = False
+        car["reason"] = "Rejected: mileage over " + str(MAX_MILES)
+        return car
+
+    retail = estimate_retail(car)
+    recon = estimate_recon(car)
+    buy = max_buy(retail, recon)
+    profit = retail - ask - recon - SAFETY_DISCOUNT - SELLING_COST_BUFFER
+
+    score = 50
+
+    if ask <= buy:
+        score += 25
+    elif ask <= buy + 750:
+        score += 10
+    else:
+        score -= 25
+
+    if profit >= 3500:
+        score += 20
+    elif profit >= MIN_TARGET_PROFIT:
+        score += 10
+    else:
+        score -= 20
+
+    if miles <= 90000:
+        score += 12
+    elif miles <= 130000:
+        score += 6
+    elif miles > 160000:
+        score -= 12
+
+    if any(m in title.lower() for m in GOOD_MODELS):
+        score += 10
+
+    if any(m in title.lower() for m in BAD_MODELS):
+        score -= 18
+
+    score = max(0, min(100, score))
+
+    if profit >= MIN_TARGET_PROFIT and score >= 60:
+        car["show"] = True
+        car["status"] = "BUY CHECK" if score >= 78 and ask <= buy else "WATCH"
+    else:
+        car["show"] = False
+        car["status"] = "SKIP"
+
+    car["score"] = score
+    car["estimated_retail"] = retail
+    car["estimated_recon"] = recon
+    car["suggested_max_buy"] = buy
+    car["estimated_profit"] = int(round(profit / 50) * 50)
+    car["reason"] = "Evaluated with max-buy formula"
+
+    return car
+
+
+def links_for(car):
+    query = quote_plus(car["title"])
+    year = quote_plus(str(car["year"] or ""))
+
+    return {
+        "KBB Value": "https://www.kbb.com/whats-my-car-worth/",
+        "KBB Comps": "https://www.kbb.com/cars-for-sale/cars/" + year + "/?searchText=" + query,
+        "Cars.com": "https://www.cars.com/shopping/results/?keyword=" + query + "&maximum_distance=100&zip=" + SEARCH_ZIP,
+        "CarGurus": "https://www.cargurus.com/Cars/inventorylisting/viewDetailsFilterViewInventoryListing.action?zip=" + SEARCH_ZIP + "&distance=" + str(SEARCH_RADIUS_MILES),
+        "KSL": "https://cars.ksl.com/search/keyword/" + query
+    }
+
+
+st.title("🚗 Car Flip AI")
+st.caption("ZIP " + SEARCH_ZIP + " · " + str(SEARCH_RADIUS_MILES) + " mile radius · Craigslist owner listings")
+
+st.info("App is scanning automatically. If no BUY cars show, open rejected listings at the bottom.")
+
+if st.button("Refresh Scan"):
+    st.rerun()
+
+raw, error = fetch_craigslist_rss()
+
+if error:
+    st.error(error)
+    st.stop()
+
+unique = dedupe(raw)
+
+shown = []
+skipped = []
+
+for car in unique:
+    checked = evaluate(car)
+
+    if checked.get("show"):
+        shown.append(checked)
+    else:
+        skipped.append(checked)
+
+shown = sorted(
+    shown,
+    key=lambda x: (x.get("score", 0), x.get("estimated_profit", 0) or 0),
+    reverse=True
+)
+
+st.write("### Scan Summary")
+st.write("Raw listings found: **" + str(len(raw)) + "**")
+st.write("After duplicate cleanup: **" + str(len(unique)) + "**")
+st.write("Shown as possible deals: **" + str(len(shown)) + "**")
+st.write("Rejected / skipped: **" + str(len(skipped)) + "**")
+
+if len(raw) == 0:
+    st.warning("Craigslist returned zero listings. This is a source issue, not your filter.")
+    st.link_button("Open Craigslist Search", craigslist_rss_url().replace("&format=rss", ""))
+
+if shown:
+    st.write("## Possible Deals")
+
+for i, car in enumerate(shown):
+    st.divider()
+
+    if car["status"] == "BUY CHECK":
+        st.success(car["status"] + " — Score " + str(car["score"]) + "/100")
+    else:
+        st.warning(car["status"] + " — Score " + str(car["score"]) + "/100")
+
+    st.subheader(car["title"])
+
+    st.write("**Ask:** " + money(car["ask"]))
+    st.write("**Year:** " + str(car["year"]))
+    st.write("**Miles:** " + "{:,}".format(car["miles"]))
+    st.write("**Estimated Retail:** " + money(car["estimated_retail"]))
+    st.write("**Estimated Recon:** " + money(car["estimated_recon"]))
+    st.write("**Estimated Profit at Ask:** " + money(car["estimated_profit"]))
+
+    st.markdown("### Suggested Max Buy: " + money(car["suggested_max_buy"]))
+
+    if car["url"]:
+        st.link_button("Open Listing", car["url"])
+
+    comp_links = links_for(car)
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.link_button("KBB Value", comp_links["KBB Value"])
+        st.link_button("Cars.com", comp_links["Cars.com"])
+        st.link_button("KSL", comp_links["KSL"])
+
+    with c2:
+        st.link_button("KBB Comps", comp_links["KBB Comps"])
+        st.link_button("CarGurus", comp_links["CarGurus"])
+
+    with st.expander("Manual KBB adjustment"):
+        kbb_value = st.number_input(
+            "Paste KBB Private Party Value",
+            min_value=0,
+            max_value=100000,
+            step=100,
+            key="kbb_" + str(i)
         )
 
-        if row["link"]:
-            st.markdown(f"[Open Listing]({row['link']})")
+        if kbb_value > 0:
+            kbb_max_buy = max_buy(kbb_value, car["estimated_recon"])
+            kbb_profit = kbb_value - car["ask"] - car["estimated_recon"] - SAFETY_DISCOUNT - SELLING_COST_BUFFER
 
-        links = value_research_links(row["title"])
-        st.markdown(
-            f"[KBB research]({links['KBB']}) | [Cars.com comps]({links['Cars.com']}) | [CarGurus comps]({links['CarGurus']})"
-        )
+            st.write("**KBB-Based Max Buy:** " + money(kbb_max_buy))
+            st.write("**KBB-Based Profit at Ask:** " + money(kbb_profit))
 
-        st.divider()
+            if car["ask"] <= kbb_max_buy:
+                st.success("KBB supports this deal.")
+            else:
+                st.error("Too expensive based on your KBB number.")
 
-else:
-    st.info("Set filters, then tap **Scan Craigslist**.")
+if not shown:
+    st.warning("No cars passed the buy filter. Check rejected listings below to see exactly why.")
+
+with st.expander("Rejected / skipped listings", expanded=True):
+    if not skipped:
+        st.write("No rejected listings.")
+    else:
+        for car in skipped[:150]:
+            st.write(
+                "**"
+                + car.get("title", "Unknown")
+                + "** — "
+                + money(car.get("ask"))
+                + " — "
+                + car.get("reason", "")
+            )
