@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(
     page_title="Car Flip AI",
     page_icon="🚗",
-    layout="wide"
+    layout="centered"
 )
 
 st.title("🚗 Car Flip AI")
