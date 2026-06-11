@@ -40,7 +40,7 @@ max_price = st.sidebar.slider(
     "Max asking price",
     min_value=1000,
     max_value=25000,
-    value=12000,
+    value=10000,
     step=500
 )
 
@@ -56,7 +56,7 @@ max_miles = st.sidebar.slider(
     "Max mileage",
     min_value=50000,
     max_value=250000,
-    value=180000,
+    value=130000,
     step=5000
 )
 
