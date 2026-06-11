@@ -1,103 +1,132 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
 import re
-import math
-import pandas as pd
+from datetime import datetime
+from urllib.parse import quote_plus
 
-
-# ==========================================================
-# PAGE SETUP
-# ==========================================================
+# =========================
+# MOBILE-FIRST PAGE SETUP
+# =========================
 
 st.set_page_config(
     page_title="Car Flip AI",
     page_icon="🚗",
-    layout="wide",
+    layout="centered"
 )
 
-st.title("🚗 Car Flip AI")
-st.caption("Craigslist private-party scanner with profit/risk scoring")
+# =========================
+# MOBILE CSS
+# =========================
 
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1.2rem;
+        padding-left: 1rem;
+        padding-right: 1rem;
+        max-width: 720px;
+    }
 
-# ==========================================================
-# MARKET SETTINGS
-# ==========================================================
+    div[data-testid="stMetric"] {
+        background-color: #111827;
+        padding: 14px;
+        border-radius: 14px;
+        border: 1px solid #374151;
+    }
+
+    div.stButton > button {
+        height: 3.3rem;
+        font-size: 1.1rem;
+        border-radius: 14px;
+        font-weight: 700;
+    }
+
+    a {
+        text-decoration: none;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# =========================
+# MARKETS
+# =========================
 
 MARKETS = {
     "Salt Lake City Metro, UT": {
-        "craigslist_site": "saltlakecity",
-        "center_city": "Salt Lake City, UT",
-        "default_radius": 85,
-        "cities": [
-            "Salt Lake City",
-            "Murray",
-            "Sandy",
-            "South Jordan",
-            "West Jordan",
-            "Draper",
-            "Riverton",
-            "Herriman",
-            "Bountiful",
-            "Layton",
-            "Ogden",
-            "Clearfield",
-            "Lehi",
-            "American Fork",
-            "Orem",
-            "Provo",
-            "Tooele",
-            "Park City",
-            "Spanish Fork",
-            "Springville",
-        ],
+        "site": "saltlakecity",
+        "postal": "84107"
     },
-    "Columbus Metro, OH": {
-        "craigslist_site": "columbus",
-        "center_city": "Columbus, OH",
-        "default_radius": 50,
-        "cities": [
-            "Columbus",
-            "Westerville",
-            "Dublin",
-            "Grove City",
-            "Reynoldsburg",
-            "Pickerington",
-            "Newark",
-            "Delaware",
-            "Lancaster",
-            "Marysville",
-            "Hilliard",
-            "Worthington",
-        ],
+    "Ogden, UT": {
+        "site": "ogden",
+        "postal": "84401"
     },
+    "Provo / Orem, UT": {
+        "site": "provo",
+        "postal": "84601"
+    },
+    "Las Vegas, NV": {
+        "site": "lasvegas",
+        "postal": "89101"
+    },
+    "Columbus, OH": {
+        "site": "columbus",
+        "postal": "43082"
+    }
 }
 
+BAD_TITLE_WORDS = [
+    "rv", "motorhome", "camper", "trailer", "semi", "tractor",
+    "box truck", "food truck", "bus", "boat", "atv", "utv",
+    "snowmobile", "forklift", "parts only", "part out",
+    "motorcycle", "scooter"
+]
 
-# ==========================================================
-# HELPERS
-# ==========================================================
+GOOD_BRANDS = [
+    "toyota", "honda", "lexus", "acura", "mazda", "subaru",
+    "ford", "chevy", "chevrolet", "gmc", "nissan", "hyundai",
+    "kia", "scion"
+]
 
-def clean_price(price_text):
-    if not price_text:
+RISKY_BRANDS = [
+    "bmw", "mercedes", "audi", "volkswagen", "vw", "mini",
+    "land rover", "range rover", "jaguar", "porsche",
+    "maserati", "volvo"
+]
+
+WARNING_WORDS = [
+    "mechanic", "needs work", "not running", "doesn't run",
+    "bad engine", "bad motor", "bad transmission", "transmission issue",
+    "overheating", "salvage", "rebuilt", "project", "no title",
+    "check engine", "blown head gasket"
+]
+
+# =========================
+# FUNCTIONS
+# =========================
+
+def clean_price(text):
+    if not text:
         return None
 
-    numbers = re.sub(r"[^\d]", "", price_text)
+    text = text.replace(",", "")
+    match = re.search(r"\$?\s*(\d{3,6})", text)
 
-    if not numbers:
-        return None
+    if match:
+        return int(match.group(1))
 
-    try:
-        return int(numbers)
-    except Exception:
-        return None
+    return None
 
 
 def extract_year(title):
     match = re.search(r"\b(19[8-9]\d|20[0-2]\d)\b", title)
+
     if match:
         return int(match.group(1))
+
     return None
 
 
@@ -108,16 +137,17 @@ def extract_mileage(text):
     text = text.lower().replace(",", "")
 
     patterns = [
-        r"(\d{2,3})k\s*miles",
-        r"(\d{2,3})k\s*mi",
+        r"(\d{2,3})\s?k\s*miles",
+        r"(\d{2,3})\s?k\s*mi",
         r"(\d{5,6})\s*miles",
         r"(\d{5,6})\s*mi",
-        r"mileage[:\s]+(\d{5,6})",
         r"odometer[:\s]+(\d{5,6})",
+        r"mileage[:\s]+(\d{5,6})"
     ]
 
     for pattern in patterns:
         match = re.search(pattern, text)
+
         if match:
             value = int(match.group(1))
 
@@ -129,535 +159,508 @@ def extract_mileage(text):
     return None
 
 
-def detect_bad_keywords(title):
-    bad_keywords = [
-        "mechanic special",
-        "mechanics special",
-        "parts only",
-        "does not run",
-        "doesn't run",
-        "not running",
-        "salvage",
-        "rebuilt title",
-        "flood",
-        "no title",
-        "bill of sale",
-        "transmission bad",
-        "bad transmission",
-        "engine bad",
-        "bad engine",
-        "blown head gasket",
-        "head gasket",
-        "project",
-        "needs engine",
-        "needs transmission",
-    ]
+def has_bad_title(title):
+    title = title.lower()
+    return any(word in title for word in BAD_TITLE_WORDS)
+
+
+def estimate_retail(title, year, mileage, ask):
+    if not ask:
+        return None
 
     title_lower = title.lower()
-
-    found = []
-    for word in bad_keywords:
-        if word in title_lower:
-            found.append(word)
-
-    return found
-
-
-def detect_good_keywords(title):
-    good_keywords = [
-        "clean title",
-        "one owner",
-        "runs great",
-        "runs good",
-        "new tires",
-        "new brakes",
-        "well maintained",
-        "no check engine",
-        "cold ac",
-        "low miles",
-        "clean carfax",
-    ]
-
-    title_lower = title.lower()
-
-    found = []
-    for word in good_keywords:
-        if word in title_lower:
-            found.append(word)
-
-    return found
-
-
-def estimate_retail_value(title, year, price):
-    """
-    Simple estimated resale model.
-    Later we can replace this with KBB / JD Power / Black Book / MarketCheck / VIN API.
-    """
-
-    title_lower = title.lower()
-
-    base_multiplier = 1.35
-
-    strong_brands = [
-        "toyota",
-        "honda",
-        "lexus",
-        "acura",
-        "subaru",
-    ]
-
-    decent_brands = [
-        "ford",
-        "chevy",
-        "chevrolet",
-        "gmc",
-        "mazda",
-        "hyundai",
-        "kia",
-        "nissan",
-    ]
-
-    risky_brands = [
-        "bmw",
-        "mercedes",
-        "audi",
-        "mini",
-        "volkswagen",
-        "vw",
-        "land rover",
-        "jaguar",
-    ]
-
-    if any(brand in title_lower for brand in strong_brands):
-        base_multiplier = 1.45
-
-    elif any(brand in title_lower for brand in decent_brands):
-        base_multiplier = 1.35
-
-    elif any(brand in title_lower for brand in risky_brands):
-        base_multiplier = 1.20
+    current_year = datetime.now().year
 
     if year:
-        current_year = datetime.now().year
         age = current_year - year
+    else:
+        age = 12
 
-        if age <= 8:
-            base_multiplier += 0.10
-        elif age >= 18:
-            base_multiplier -= 0.10
+    if ask <= 2500:
+        retail = ask + 2500
+    elif ask <= 5000:
+        retail = ask + 3200
+    elif ask <= 8000:
+        retail = ask + 3500
+    elif ask <= 12000:
+        retail = ask + 3800
+    else:
+        retail = ask + 3000
 
-    estimated = int(price * base_multiplier)
+    if any(brand in title_lower for brand in GOOD_BRANDS):
+        retail += 900
 
-    return estimated
+    if any(brand in title_lower for brand in RISKY_BRANDS):
+        retail -= 1200
+
+    if mileage:
+        if mileage <= 90000:
+            retail += 1000
+        elif mileage <= 130000:
+            retail += 400
+        elif mileage <= 170000:
+            retail -= 600
+        else:
+            retail -= 1500
+
+    if age <= 8:
+        retail += 700
+    elif age >= 17:
+        retail -= 700
+
+    return max(retail, ask)
 
 
-def score_listing(title, price, year, mileage, target_profit, max_mileage):
-    if price is None:
-        return {
-            "decision": "SKIP",
-            "score": 0,
-            "risk": "High",
-            "estimated_retail": None,
-            "estimated_profit": None,
-            "reason": "No price found",
-        }
+def estimate_recon(title, mileage):
+    title_lower = title.lower()
 
-    if price < 1000:
-        return {
-            "decision": "SKIP",
-            "score": 5,
-            "risk": "High",
-            "estimated_retail": None,
-            "estimated_profit": None,
-            "reason": "Price too low / likely junk or scam",
-        }
+    recon = 900
 
-    if price > 15000:
-        return {
-            "decision": "SKIP",
-            "score": 10,
-            "risk": "High",
-            "estimated_retail": None,
-            "estimated_profit": None,
-            "reason": "Too expensive for current flip budget",
-        }
+    if mileage:
+        if mileage > 130000:
+            recon += 500
+        if mileage > 170000:
+            recon += 900
 
-    bad_words = detect_bad_keywords(title)
-    good_words = detect_good_keywords(title)
+    if any(brand in title_lower for brand in RISKY_BRANDS):
+        recon += 1200
 
-    estimated_retail = estimate_retail_value(title, year, price)
-    estimated_profit = estimated_retail - price
+    if any(word in title_lower for word in WARNING_WORDS):
+        recon += 1800
+
+    return recon
+
+
+def score_listing(title, price, retail, recon, mileage, target_profit, max_mileage):
+    if not price or not retail:
+        return 0, "SKIP", 0
+
+    profit = retail - price - recon
+    title_lower = title.lower()
 
     score = 50
-    risk = "Medium"
-    reasons = []
 
-    if estimated_profit >= target_profit:
-        score += 25
-        reasons.append(f"Profit estimate over target: ${estimated_profit:,}")
+    if profit >= target_profit:
+        score += 28
+    elif profit >= target_profit * 0.70:
+        score += 14
     else:
-        score -= 20
-        reasons.append(f"Profit estimate below target: ${estimated_profit:,}")
-
-    if year:
-        if year >= 2012:
-            score += 10
-            reasons.append("Good model year range")
-        elif year < 2005:
-            score -= 10
-            reasons.append("Older vehicle")
+        score -= 18
 
     if mileage:
         if mileage <= max_mileage:
             score += 10
-            reasons.append(f"Mileage under max: {mileage:,}")
         else:
-            score -= 20
-            reasons.append(f"Mileage over max: {mileage:,}")
+            score -= 18
+    else:
+        score -= 4
 
-    if bad_words:
-        score -= 35
-        risk = "High"
-        reasons.append("Bad keywords: " + ", ".join(bad_words))
-
-    if good_words:
+    if any(brand in title_lower for brand in GOOD_BRANDS):
         score += 10
-        reasons.append("Good keywords: " + ", ".join(good_words))
 
-    if price <= 7000:
-        score += 10
-        reasons.append("Good buy range")
+    if any(brand in title_lower for brand in RISKY_BRANDS):
+        score -= 15
 
-    if price <= 4500:
-        score += 5
-        reasons.append("Strong cheap flip range")
+    if any(word in title_lower for word in WARNING_WORDS):
+        score -= 20
+
+    if has_bad_title(title):
+        score -= 50
 
     score = max(0, min(100, score))
 
-    if score >= 75 and estimated_profit >= target_profit and not bad_words:
+    if score >= 80 and profit >= target_profit:
         decision = "BUY TARGET"
-        risk = "Low" if risk != "High" else "High"
-    elif score >= 55 and estimated_profit >= target_profit * 0.6:
+    elif score >= 65:
         decision = "WATCH / NEGOTIATE"
+    elif score >= 50:
+        decision = "CHECK MANUALLY"
     else:
         decision = "SKIP"
 
-    return {
-        "decision": decision,
-        "score": score,
-        "risk": risk,
-        "estimated_retail": estimated_retail,
-        "estimated_profit": estimated_profit,
-        "reason": "; ".join(reasons),
-    }
+    return score, decision, profit
 
 
-def build_craigslist_url(site, max_results):
-    return f"https://{site}.craigslist.org/search/cto?bundleDuplicates=1&sort=date&max_price=15000#search=1~gallery~0~0"
+def build_url(market, radius, min_price, max_price, query):
+    site = MARKETS[market]["site"]
+    postal = MARKETS[market]["postal"]
+
+    url = (
+        f"https://{site}.craigslist.org/search/cto"
+        f"?postal={postal}"
+        f"&search_distance={radius}"
+        f"&min_price={min_price}"
+        f"&max_price={max_price}"
+        f"&bundleDuplicates=1"
+        f"&sort=date"
+    )
+
+    if query.strip():
+        url += f"&query={quote_plus(query.strip())}"
+
+    return url
 
 
-def fetch_craigslist(site, max_results):
-    url = build_craigslist_url(site, max_results)
-
+def fetch_page(url):
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-            "Mobile/15E148 Safari/604.1"
-        )
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "Version/17.0 Mobile/15E148 Safari/604.1"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Connection": "keep-alive"
     }
 
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-    except Exception as e:
-        return [], f"Request failed: {e}"
+    response = requests.get(url, headers=headers, timeout=25)
+    return response.status_code, response.text
 
-    if response.status_code != 200:
-        return [], f"Craigslist returned status code {response.status_code}"
 
-    soup = BeautifulSoup(response.text, "html.parser")
+def parse_listings(html):
+    soup = BeautifulSoup(html, "html.parser")
+    listings = []
 
-    rows = []
+    # Craigslist current static layout
+    rows = soup.select("li.cl-static-search-result")
 
-    listings = soup.select("li.cl-search-result")
+    for row in rows:
+        title_el = row.select_one(".title")
+        price_el = row.select_one(".price")
+        location_el = row.select_one(".location")
+        link_el = row.select_one("a")
 
-    if not listings:
-        listings = soup.select(".result-row")
+        title = title_el.get_text(" ", strip=True) if title_el else ""
+        price = clean_price(price_el.get_text(" ", strip=True)) if price_el else None
+        location = location_el.get_text(" ", strip=True) if location_el else ""
+        url = link_el.get("href") if link_el else ""
 
-    for item in listings[:max_results]:
-        title = ""
-        link = ""
-        price = None
-        location = ""
-
-        title_el = item.select_one(".titlestring") or item.select_one("a")
-        price_el = item.select_one(".price")
-        location_el = item.select_one(".location")
-
-        if title_el:
-            title = title_el.get_text(" ", strip=True)
-            link = title_el.get("href", "")
-
-        if price_el:
-            price = clean_price(price_el.get_text(" ", strip=True))
-
-        if location_el:
-            location = location_el.get_text(" ", strip=True)
-
-        if not title:
-            continue
-
-        year = extract_year(title)
-        mileage = extract_mileage(title)
-
-        rows.append(
-            {
+        if title and url:
+            listings.append({
                 "title": title,
                 "price": price,
-                "year": year,
-                "mileage": mileage,
                 "location": location,
-                "link": link,
-            }
-        )
+                "url": url
+            })
 
-    return rows, None
+    # Craigslist older layout fallback
+    if not listings:
+        rows = soup.select("li.result-row")
+
+        for row in rows:
+            title_el = row.select_one(".result-title")
+            price_el = row.select_one(".result-price")
+            location_el = row.select_one(".result-hood")
+
+            title = title_el.get_text(" ", strip=True) if title_el else ""
+            price = clean_price(price_el.get_text(" ", strip=True)) if price_el else None
+            location = location_el.get_text(" ", strip=True) if location_el else ""
+            url = title_el.get("href") if title_el else ""
+
+            if title and url:
+                listings.append({
+                    "title": title,
+                    "price": price,
+                    "location": location,
+                    "url": url
+                })
+
+    # Emergency fallback: pull listing cards from all links
+    if not listings:
+        for link in soup.find_all("a", href=True):
+            href = link.get("href", "")
+            text = link.get_text(" ", strip=True)
+
+            if "/cto/d/" in href and text:
+                price = clean_price(text)
+                title = re.sub(r"\$\s?\d[\d,]*", "", text).strip()
+
+                if title:
+                    listings.append({
+                        "title": title,
+                        "price": price,
+                        "location": "",
+                        "url": href
+                    })
+
+    # Remove duplicates
+    clean = []
+    seen = set()
+
+    for item in listings:
+        key = item["url"]
+
+        if key not in seen:
+            seen.add(key)
+            clean.append(item)
+
+    return clean
 
 
-def format_money(value):
-    if value is None:
-        return ""
-    return f"${value:,}"
+def analyze(item, target_profit, max_mileage):
+    title = item["title"]
+    price = item["price"]
 
+    year = extract_year(title)
+    mileage = extract_mileage(title)
 
-def format_number(value):
-    if value is None:
-        return ""
-    return f"{value:,}"
-
-
-# ==========================================================
-# SIDEBAR
-# ==========================================================
-
-with st.sidebar:
-    st.header("Search Settings")
-
-    selected_market = st.selectbox(
-        "Market",
-        list(MARKETS.keys()),
-        index=0,
+    retail = estimate_retail(title, year, mileage, price)
+    recon = estimate_recon(title, mileage)
+    score, decision, profit = score_listing(
+        title,
+        price,
+        retail,
+        recon,
+        mileage,
+        target_profit,
+        max_mileage
     )
 
-    market_data = MARKETS[selected_market]
+    item["year"] = year
+    item["mileage"] = mileage
+    item["retail"] = retail
+    item["recon"] = recon
+    item["score"] = score
+    item["decision"] = decision
+    item["profit"] = profit
 
-    radius_miles = st.slider(
-        f"Search radius from {market_data['center_city']}",
-        min_value=10,
-        max_value=150,
-        value=market_data["default_radius"],
-        step=5,
-    )
-
-    max_results = st.slider(
-        "Listings to scan",
-        min_value=10,
-        max_value=250,
-        value=75,
-        step=5,
-    )
-
-    target_profit = st.slider(
-        "Target profit",
-        min_value=500,
-        max_value=5000,
-        value=2000,
-        step=250,
-    )
-
-    max_mileage = st.slider(
-        "Max mileage",
-        min_value=80000,
-        max_value=250000,
-        value=180000,
-        step=5000,
-    )
-
-    st.divider()
-
-    st.subheader("Current Sources")
-    st.success("Craigslist enabled")
-    st.info("KSL / Facebook planned")
-    st.warning("Value estimates are AI estimates, not official KBB/JD Power yet.")
-
-    st.divider()
-
-    st.subheader("Cities covered")
-    st.caption(f"{market_data['center_city']} + {radius_miles} mile radius")
-
-    for city in market_data["cities"]:
-        st.write(f"• {city}")
+    return item
 
 
-# ==========================================================
-# MAIN APP
-# ==========================================================
+# =========================
+# APP SCREEN
+# =========================
 
-col1, col2, col3, col4 = st.columns(4)
+st.title("Car Flip AI")
+st.caption("Mobile Craigslist private-party scanner")
 
-with col1:
-    st.metric("Market", selected_market)
+st.subheader("Settings")
 
-with col2:
-    st.metric("Radius", f"{radius_miles} mi")
+market = st.selectbox(
+    "Market",
+    list(MARKETS.keys()),
+    index=0
+)
 
-with col3:
-    st.metric("Target Profit", f"${target_profit:,}")
+radius = st.slider(
+    "Radius",
+    min_value=10,
+    max_value=200,
+    value=85,
+    step=5
+)
 
-with col4:
-    st.metric("Max Mileage", f"{max_mileage:,}")
+target_profit = st.number_input(
+    "Target Profit",
+    min_value=500,
+    max_value=10000,
+    value=2000,
+    step=250
+)
 
+max_mileage = st.number_input(
+    "Max Mileage",
+    min_value=50000,
+    max_value=250000,
+    value=130000,
+    step=5000
+)
+
+min_price = st.number_input(
+    "Min Price",
+    min_value=0,
+    max_value=50000,
+    value=1000,
+    step=500
+)
+
+max_price = st.number_input(
+    "Max Price",
+    min_value=1000,
+    max_value=50000,
+    value=12000,
+    step=500
+)
+
+query = st.text_input(
+    "Search Keyword",
+    value=""
+)
+
+show_debug = st.checkbox(
+    "Show debug info",
+    value=True
+)
+
+search_url = build_url(
+    market,
+    radius,
+    min_price,
+    max_price,
+    query
+)
 
 st.divider()
 
-scan_button = st.button("Scan Craigslist", type="primary", use_container_width=True)
+m1, m2 = st.columns(2)
 
-if scan_button:
-    with st.spinner("Scanning Craigslist private-party listings..."):
-        listings, error = fetch_craigslist(
-            market_data["craigslist_site"],
-            max_results,
-        )
+with m1:
+    st.metric("Market", market)
 
-    if error:
-        st.error(error)
-        st.stop()
+with m2:
+    st.metric("Radius", f"{radius} mi")
 
-    if not listings:
-        st.warning("No listings parsed. Craigslist may have changed layout or blocked the request.")
-        st.stop()
+m3, m4 = st.columns(2)
 
-    results = []
+with m3:
+    st.metric("Target Profit", f"${target_profit:,.0f}")
 
-    for listing in listings:
-        analysis = score_listing(
-            title=listing["title"],
-            price=listing["price"],
-            year=listing["year"],
-            mileage=listing["mileage"],
-            target_profit=target_profit,
-            max_mileage=max_mileage,
-        )
+with m4:
+    st.metric("Max Mileage", f"{max_mileage:,.0f}")
 
-        results.append(
-            {
-                "Decision": analysis["decision"],
-                "Score": analysis["score"],
-                "Risk": analysis["risk"],
-                "Title": listing["title"],
-                "Price": listing["price"],
-                "Est. Retail": analysis["estimated_retail"],
-                "Est. Profit": analysis["estimated_profit"],
-                "Year": listing["year"],
-                "Mileage": listing["mileage"],
-                "Location": listing["location"],
-                "Reason": analysis["reason"],
-                "Link": listing["link"],
-            }
-        )
+st.divider()
 
-    df = pd.DataFrame(results)
+scan = st.button(
+    "Scan Craigslist",
+    type="primary",
+    use_container_width=True
+)
 
-    df = df.sort_values(
-        by=["Score", "Est. Profit"],
-        ascending=[False, False],
-        na_position="last",
-    )
+if scan:
+    with st.spinner("Scanning Craigslist..."):
+        try:
+            status_code, html = fetch_page(search_url)
 
-    buy_targets = df[df["Decision"] == "BUY TARGET"]
-    watch_targets = df[df["Decision"] == "WATCH / NEGOTIATE"]
-    skip_targets = df[df["Decision"] == "SKIP"]
+            if show_debug:
+                st.info(f"Craigslist status code: {status_code}")
+                st.write("Search URL:")
+                st.code(search_url)
 
-    st.success(f"Parsed listings: {len(df)}")
-    st.metric("Buy Targets", len(buy_targets))
-    st.metric("Watch / Negotiate", len(watch_targets))
-    st.metric("Skips", len(skip_targets))
+            if status_code != 200:
+                st.error("Craigslist did not return a normal page.")
+                st.write("Open this URL manually to test:")
+                st.link_button("Open Craigslist Search", search_url)
 
-    st.divider()
+                if show_debug:
+                    st.write("Craigslist response preview:")
+                    st.code(html[:1500])
 
-    st.subheader("Best Deals First")
+                st.stop()
 
-    display_df = df.copy()
+            raw = parse_listings(html)
 
-    for col in ["Price", "Est. Retail", "Est. Profit"]:
-        display_df[col] = display_df[col].apply(format_money)
+            if not raw:
+                st.warning("No listings parsed. This usually means Craigslist blocked Streamlit Cloud or changed the result layout.")
 
-    display_df["Mileage"] = display_df["Mileage"].apply(format_number)
+                st.write("Open this URL manually to check if Craigslist works in your browser:")
+                st.link_button("Open Craigslist Search", search_url)
 
-    st.dataframe(
-        display_df[
-            [
-                "Decision",
-                "Score",
-                "Risk",
-                "Title",
-                "Price",
-                "Est. Retail",
-                "Est. Profit",
-                "Year",
-                "Mileage",
-                "Location",
-                "Reason",
-                "Link",
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
+                if show_debug:
+                    st.write("Craigslist response preview:")
+                    st.code(html[:2000])
 
-    st.divider()
+                st.stop()
 
-    st.subheader("Buy Target Cards")
+            analyzed = []
 
-    if buy_targets.empty:
-        st.warning("No strong buy targets found. Try scanning more listings or lowering target profit.")
-    else:
-        for _, row in buy_targets.iterrows():
-            with st.container(border=True):
-                st.markdown(f"### {row['Title']}")
-                st.write(f"**Decision:** {row['Decision']}")
-                st.write(f"**Score:** {row['Score']}/100")
-                st.write(f"**Risk:** {row['Risk']}")
-                st.write(f"**Price:** {format_money(row['Price'])}")
-                st.write(f"**Estimated Retail:** {format_money(row['Est. Retail'])}")
-                st.write(f"**Estimated Profit:** {format_money(row['Est. Profit'])}")
+            for item in raw:
+                analyzed_item = analyze(item, target_profit, max_mileage)
 
-                if row["Mileage"]:
-                    st.write(f"**Mileage:** {format_number(row['Mileage'])}")
+                if analyzed_item["decision"] != "SKIP":
+                    analyzed.append(analyzed_item)
 
-                if row["Location"]:
-                    st.write(f"**Location:** {row['Location']}")
+            analyzed = sorted(
+                analyzed,
+                key=lambda x: (x["score"], x["profit"]),
+                reverse=True
+            )
 
-                st.write(f"**Reason:** {row['Reason']}")
+            buy_targets = [x for x in analyzed if x["decision"] == "BUY TARGET"]
+            watch_targets = [x for x in analyzed if x["decision"] == "WATCH / NEGOTIATE"]
 
-                if row["Link"]:
-                    st.link_button("Open Listing", row["Link"])
+            st.success(f"Parsed {len(raw)} listings. Showing {len(analyzed)} candidates.")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Buy", len(buy_targets))
+            c2.metric("Watch", len(watch_targets))
+            c3.metric("Parsed", len(raw))
+
+            st.divider()
+
+            if not analyzed:
+                st.warning("Listings were found, but all were scored as SKIP. Raise mileage or lower target profit to see more.")
+                st.stop()
+
+            for item in analyzed[:60]:
+                decision = item["decision"]
+
+                if decision == "BUY TARGET":
+                    icon = "🟢"
+                elif decision == "WATCH / NEGOTIATE":
+                    icon = "🟡"
+                elif decision == "CHECK MANUALLY":
+                    icon = "🟠"
+                else:
+                    icon = "🔴"
+
+                with st.container(border=True):
+                    st.subheader(f"{icon} {item['title']}")
+
+                    a, b = st.columns(2)
+
+                    with a:
+                        st.metric(
+                            "Ask",
+                            f"${item['price']:,.0f}" if item["price"] else "N/A"
+                        )
+
+                        st.metric(
+                            "Profit Est.",
+                            f"${item['profit']:,.0f}"
+                        )
+
+                        st.metric(
+                            "Score",
+                            f"{item['score']}/100"
+                        )
+
+                    with b:
+                        st.metric(
+                            "Retail Est.",
+                            f"${item['retail']:,.0f}" if item["retail"] else "N/A"
+                        )
+
+                        st.metric(
+                            "Recon Est.",
+                            f"${item['recon']:,.0f}"
+                        )
+
+                        st.metric(
+                            "Mileage",
+                            f"{item['mileage']:,.0f}" if item["mileage"] else "Unknown"
+                        )
+
+                    st.write(f"**Decision:** {item['decision']}")
+                    st.write(f"**Location:** {item['location'] if item['location'] else 'Not shown'}")
+                    st.write(f"**Year:** {item['year'] if item['year'] else 'Unknown'}")
+
+                    st.link_button(
+                        "Open Listing",
+                        item["url"],
+                        use_container_width=True
+                    )
+
+        except requests.exceptions.RequestException as e:
+            st.error("Request failed. Craigslist may be blocking Streamlit Cloud.")
+            st.code(str(e))
+
+        except Exception as e:
+            st.error("Unexpected app error.")
+            st.code(str(e))
 
 else:
-    st.info("Choose market/settings on the left, then tap Scan Craigslist.")
-
-    st.markdown(
-        """
-        ### What this version fixes
-
-        - Salt Lake City is now treated as **Salt Lake City Metro + radius**
-        - Columbus is now treated as **Columbus Metro + radius**
-        - Target profit can be changed
-        - Max mileage can be changed
-        - Listings are scored as:
-          - **BUY TARGET**
-          - **WATCH / NEGOTIATE**
-          - **SKIP**
-        - Craigslist private-party source is enabled
-        """
-    )
+    st.write("Press **Scan Craigslist** to start.")
+    st.write("Current Craigslist search URL:")
+    st.code(search_url)
